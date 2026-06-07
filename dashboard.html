@@ -92,6 +92,8 @@
 const MAXPTS = 60;          // ~12s of history at 5Hz
 const angHist = [], spdLHist = [], spdRHist = [], labels = [];
 let lastUpdated = null, staleSince = null;
+// Latch: once a wheel has actually turned this session, we know its encoder works.
+let leftEverMoved = false, rightEverMoved = false;
 
 async function loadTelemetry(){
   try{
@@ -132,18 +134,30 @@ function render(d){
   document.getElementById('m-mpu').innerHTML   = d.MpuOk
     ? '<span class="pill green">online</span>' : '<span class="pill red">no I2C</span>';
 
-  // Right-encoder health hint (stock firmware showed it stuck near 0)
+  // Track whether each wheel has ever produced encoder motion this session.
+  if(d.encR > 0 || Math.abs(d.spdR) > 0) rightEverMoved = true;
+  if(d.encL > 0 || Math.abs(d.spdL) > 0) leftEverMoved = true;
+  const driving = !d.Standby;
+
+  // Right-encoder health hint. At idle every encoder reads 0, so only warn when
+  // we are actually driving but the right wheel still isn't counting.
   const rlbl = document.getElementById('m-spdR-lbl');
-  if(!d.RightEncoderActive && d.encR === 0){
+  if(rightEverMoved){
+    rlbl.innerHTML = 'encoder counts / sec <span class="pill green">ok</span>';
+  } else if(driving && Math.abs(d.spdR) === 0){
     rlbl.innerHTML = 'encoder counts / sec <span class="pill yellow">no pulses</span>';
-  } else { rlbl.textContent = 'encoder counts / sec'; }
+  } else {
+    rlbl.innerHTML = 'encoder counts / sec <span class="pill blue">idle</span>';
+  }
 
   // Detail cards
   document.getElementById('enc-info').innerHTML = `
     <div class="row"><span>Left count</span><b>${d.encL}</b></div>
     <div class="row"><span>Right count</span><b>${d.encR}</b></div>
-    <div class="row"><span>Right encoder</span>${d.RightEncoderActive
-      ? '<span class="pill green">active</span>' : '<span class="pill yellow">not counting</span>'}</div>`;
+    <div class="row"><span>Right encoder</span>${rightEverMoved
+      ? '<span class="pill green">ok</span>'
+      : (driving ? '<span class="pill yellow">not counting</span>'
+                 : '<span class="pill blue">idle</span>')}</div>`;
 
   document.getElementById('accel-info').innerHTML = `
     <div class="row"><span>ax</span><b>${d.ax}</b></div>
