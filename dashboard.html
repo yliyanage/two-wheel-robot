@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tumbller Robot Dashboard</title>
+<script src="vendor/chart.umd.min.js"></script>
+<!-- Live telemetry written by drive-bridge.ps1 (window.TELEMETRY fallback for file://). -->
+<script src="telemetry.js" onerror="window.__noTel=true"></script>
+<style>
+  :root{
+    --bg:#0d1117; --card:#161b22; --border:#21262d; --text:#e6edf3;
+    --muted:#8b949e; --green:#3fb950; --yellow:#d29922; --red:#f85149; --blue:#58a6ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  h1{margin:0 0 4px}
+  .wrap{max-width:1200px;margin:0 auto;padding:24px}
+  .sub{color:var(--muted);font-size:14px;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px}
+  .col-3{grid-column:span 3}.col-4{grid-column:span 4}.col-6{grid-column:span 6}.col-12{grid-column:span 12}
+  @media(max-width:900px){.col-3,.col-4,.col-6{grid-column:span 12}}
+  h2{font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:0 0 10px}
+  .metric{font-size:34px;font-weight:700;line-height:1}
+  .metric small{font-size:14px;color:var(--muted);font-weight:400}
+  .label{color:var(--muted);font-size:13px;margin-top:6px}
+  .pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}
+  .pill.green{background:rgba(63,185,80,.15);color:var(--green)}
+  .pill.red{background:rgba(248,81,73,.15);color:var(--red)}
+  .pill.yellow{background:rgba(210,153,34,.15);color:var(--yellow)}
+  .pill.blue{background:rgba(88,166,255,.15);color:var(--blue)}
+  .row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)}
+  .row:last-child{border-bottom:none}
+  .row span{color:var(--muted)}.row b{font-variant-numeric:tabular-nums}
+  .banner{border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:14px;font-weight:600}
+  .banner.ok{background:rgba(63,185,80,.12);border:1px solid rgba(63,185,80,.4);color:var(--green)}
+  .banner.warn{background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.4);color:var(--yellow)}
+  .banner.stale{background:rgba(248,81,73,.12);border:1px solid rgba(248,81,73,.4);color:var(--red)}
+  .footer{color:var(--muted);font-size:12px;margin-top:24px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Tumbller Robot Dashboard</h1>
+  <div class="sub" id="subtitle">Connecting to telemetry...</div>
+
+  <div class="banner ok" id="motor-banner">Motors: STANDBY (driver disabled) - the robot cannot drive.</div>
+
+  <div class="grid">
+    <div class="card col-3"><h2>Tilt Angle</h2><div class="metric" id="m-angle">--</div><div class="label">approx pitch from accelerometer</div></div>
+    <div class="card col-3"><h2>Left Wheel</h2><div class="metric" id="m-spdL">--</div><div class="label">encoder counts / sec</div></div>
+    <div class="card col-3"><h2>Right Wheel</h2><div class="metric" id="m-spdR">--</div><div class="label" id="m-spdR-lbl">encoder counts / sec</div></div>
+    <div class="card col-3"><h2>IMU (MPU6050)</h2><div class="metric" id="m-mpu">--</div><div class="label">I2C gyro / accel</div></div>
+
+    <div class="card col-6">
+      <h2>Tilt Angle (live)</h2>
+      <canvas id="angleChart" height="120"></canvas>
+    </div>
+    <div class="card col-6">
+      <h2>Wheel Speed (live)</h2>
+      <canvas id="speedChart" height="120"></canvas>
+    </div>
+
+    <div class="card col-4">
+      <h2>Encoders</h2>
+      <div id="enc-info"></div>
+    </div>
+    <div class="card col-4">
+      <h2>Accelerometer (raw)</h2>
+      <div id="accel-info"></div>
+    </div>
+    <div class="card col-4">
+      <h2>Gyroscope (raw)</h2>
+      <div id="gyro-info"></div>
+    </div>
+
+    <div class="card col-6">
+      <h2>Motors</h2>
+      <div id="motor-info"></div>
+    </div>
+    <div class="card col-6">
+      <h2>Link</h2>
+      <div id="link-info"></div>
+    </div>
+  </div>
+
+  <div class="footer" id="footer">Read-only telemetry view - this dashboard never commands the robot.</div>
+</div>
+
+<script>
+const MAXPTS = 60;          // ~12s of history at 5Hz
+const angHist = [], spdLHist = [], spdRHist = [], labels = [];
+let lastUpdated = null, staleSince = null;
+
+async function loadTelemetry(){
+  try{
+    const res = await fetch('telemetry.json?_=' + Date.now());
+    if(!res.ok) throw new Error('http ' + res.status);
+    return await res.json();
+  }catch(e){
+    return window.TELEMETRY || null;   // file:// fallback
+  }
+}
+
+const angleChart = new Chart(document.getElementById('angleChart'), {
+  type:'line',
+  data:{labels, datasets:[{label:'angle (deg)', data:angHist, borderColor:'#58a6ff', backgroundColor:'rgba(88,166,255,.1)', fill:true, tension:.3, pointRadius:0, borderWidth:2}]},
+  options:{animation:false, plugins:{legend:{display:false}}, scales:{x:{display:false}, y:{ticks:{color:'#8b949e'}, grid:{color:'#21262d'}}}}
+});
+const speedChart = new Chart(document.getElementById('speedChart'), {
+  type:'line',
+  data:{labels, datasets:[
+    {label:'left', data:spdLHist, borderColor:'#3fb950', pointRadius:0, borderWidth:2, tension:.3},
+    {label:'right', data:spdRHist, borderColor:'#d29922', pointRadius:0, borderWidth:2, tension:.3}
+  ]},
+  options:{animation:false, plugins:{legend:{labels:{color:'#8b949e'}}}, scales:{x:{display:false}, y:{ticks:{color:'#8b949e'}, grid:{color:'#21262d'}}}}
+});
+
+function push(arr, v){ arr.push(v); if(arr.length > MAXPTS) arr.shift(); }
+
+function render(d){
+  if(!d){ document.getElementById('subtitle').textContent = 'No telemetry yet. Run auto-launch.ps1 (or drive-bridge.ps1) and connect the board.'; return; }
+
+  document.getElementById('subtitle').textContent =
+    `Port ${d.Port||'?'} @ ${d.Baud||'?'} baud - device clock ${Math.round((d.t||0)/1000)}s - updated ${d.Updated||'?'}`;
+
+  // Headline metrics
+  document.getElementById('m-angle').innerHTML = (d.MpuOk ? (d.angle).toFixed(1) : '--') + '<small> deg</small>';
+  document.getElementById('m-spdL').innerHTML  = Math.round(d.spdL) + '<small> c/s</small>';
+  document.getElementById('m-spdR').innerHTML  = Math.round(d.spdR) + '<small> c/s</small>';
+  document.getElementById('m-mpu').innerHTML   = d.MpuOk
+    ? '<span class="pill green">online</span>' : '<span class="pill red">no I2C</span>';
+
+  // Right-encoder health hint (stock firmware showed it stuck near 0)
+  const rlbl = document.getElementById('m-spdR-lbl');
+  if(!d.RightEncoderActive && d.encR === 0){
+    rlbl.innerHTML = 'encoder counts / sec <span class="pill yellow">no pulses</span>';
+  } else { rlbl.textContent = 'encoder counts / sec'; }
+
+  // Detail cards
+  document.getElementById('enc-info').innerHTML = `
+    <div class="row"><span>Left count</span><b>${d.encL}</b></div>
+    <div class="row"><span>Right count</span><b>${d.encR}</b></div>
+    <div class="row"><span>Right encoder</span>${d.RightEncoderActive
+      ? '<span class="pill green">active</span>' : '<span class="pill yellow">not counting</span>'}</div>`;
+
+  document.getElementById('accel-info').innerHTML = `
+    <div class="row"><span>ax</span><b>${d.ax}</b></div>
+    <div class="row"><span>ay</span><b>${d.ay}</b></div>
+    <div class="row"><span>az</span><b>${d.az}</b></div>`;
+
+  document.getElementById('gyro-info').innerHTML = `
+    <div class="row"><span>gx</span><b>${d.gx}</b></div>
+    <div class="row"><span>gy</span><b>${d.gy}</b></div>
+    <div class="row"><span>gz</span><b>${d.gz}</b></div>`;
+
+  document.getElementById('motor-info').innerHTML = `
+    <div class="row"><span>Driver state</span>${d.Standby
+      ? '<span class="pill green">STANDBY (safe)</span>' : '<span class="pill red">ENABLED</span>'}</div>
+    <div class="row"><span>Left PWM</span><b>${d.pwmL}</b></div>
+    <div class="row"><span>Right PWM</span><b>${d.pwmR}</b></div>`;
+
+  // Motor safety banner
+  const mb = document.getElementById('motor-banner');
+  if(d.Standby){ mb.className='banner ok'; mb.textContent='Motors: STANDBY (driver disabled) - the robot cannot drive.'; }
+  else { mb.className='banner warn'; mb.textContent='Motors: ENABLED - the robot can move. Keep wheels clear.'; }
+
+  // Charts
+  push(labels, ''); push(angHist, d.MpuOk ? d.angle : null);
+  push(spdLHist, d.spdL); push(spdRHist, d.spdR);
+  angleChart.update(); speedChart.update();
+
+  // Link freshness
+  lastUpdated = d.Updated;
+}
+
+function renderLink(){
+  const li = document.getElementById('link-info');
+  const fresh = (lastUpdated && lastUpdated !== '(waiting for bridge)');
+  li.innerHTML = `
+    <div class="row"><span>Bridge</span>${fresh
+      ? '<span class="pill green">receiving</span>' : '<span class="pill yellow">waiting</span>'}</div>
+    <div class="row"><span>Last packet</span><b>${lastUpdated || '--'}</b></div>
+    <div class="row"><span>Mode</span><span class="pill blue">read-only</span></div>`;
+}
+
+async function tick(){
+  const d = await loadTelemetry();
+  render(d);
+  renderLink();
+}
+setInterval(tick, 250);
+tick();
+</script>
+</body>
+</html>

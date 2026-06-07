@@ -1,0 +1,13 @@
+# Runtime / generated telemetry (recreated by the bridge each run)
+telemetry.json
+telemetry.js
+command.txt
+
+# arduino-cli build output
+build/
+*.hex
+*.elf
+
+# OS / editor cruft
+Thumbs.db
+.DS_Store

@@ -1,0 +1,20 @@
+# Sketch profiles for arduino-cli (Elegoo Tumbller = Arduino Nano).
+# Build:  arduino-cli compile -e
+# Upload: arduino-cli upload -p COM3
+#
+# CH340-based Nano clones use one of two bootloaders. This board responded to
+# the NEW bootloader (nano-new, 115200). If a future upload fails with a
+# "not in sync" error, switch the active profile back to "nano-old".
+
+profiles:
+  nano-old:
+    fqbn: arduino:avr:nano:cpu=atmega328old
+    platforms:
+      - platform: arduino:avr (1.8.8)
+  nano-new:
+    fqbn: arduino:avr:nano:cpu=atmega328
+    platforms:
+      - platform: arduino:avr (1.8.8)
+
+default_profile: nano-new
+default_port: COM3
