@@ -38,12 +38,26 @@
   .banner.warn{background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.4);color:var(--yellow)}
   .banner.stale{background:rgba(248,81,73,.12);border:1px solid rgba(248,81,73,.4);color:var(--red)}
   .footer{color:var(--muted);font-size:12px;margin-top:24px;text-align:center}
+  .ctrl-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+  @media(max-width:700px){.ctrl-grid{grid-template-columns:repeat(2,1fr)}}
+  .btn{background:#21262d;border:1px solid #30363d;color:var(--text);padding:10px 8px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;transition:background .12s}
+  .btn:hover{background:#30363d}
+  .btn:active{transform:translateY(1px)}
+  .btn small{display:block;color:var(--muted);font-weight:400;font-size:11px;margin-top:2px}
+  .btn.stop{grid-column:1/-1;background:var(--red);border-color:var(--red);color:#fff;font-size:16px;padding:14px}
+  .btn.stop:hover{background:#ff6b60}
+  .slider-row{display:flex;align-items:center;gap:12px;margin:4px 0 4px}
+  .slider-row input[type=range]{flex:1;accent-color:var(--blue)}
+  .slider-row b{font-variant-numeric:tabular-nums;min-width:34px;text-align:right}
+  .ctrl-note{color:var(--muted);font-size:12px;margin-top:10px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Tumbller Robot Dashboard</h1>
   <div class="sub" id="subtitle">Connecting to telemetry...</div>
+
+  <div class="banner stale" id="conn-banner" style="display:none"></div>
 
   <div class="banner ok" id="motor-banner">Motors: STANDBY (driver disabled) - the robot cannot drive.</div>
 
@@ -52,6 +66,29 @@
     <div class="card col-3"><h2>Left Wheel</h2><div class="metric" id="m-spdL">--</div><div class="label">encoder counts / sec</div></div>
     <div class="card col-3"><h2>Right Wheel</h2><div class="metric" id="m-spdR">--</div><div class="label" id="m-spdR-lbl">encoder counts / sec</div></div>
     <div class="card col-3"><h2>IMU (MPU6050)</h2><div class="metric" id="m-mpu">--</div><div class="label">I2C gyro / accel</div></div>
+
+    <div class="card col-12">
+      <h2>Manual control / troubleshoot</h2>
+      <div class="slider-row">
+        <span class="label" style="margin:0">Speed (PWM)</span>
+        <input type="range" id="pwm-slider" min="0" max="120" step="5" value="80"
+               oninput="document.getElementById('pwm-val').textContent=this.value">
+        <b id="pwm-val">80</b>
+        <span id="cmd-status" class="pill blue">idle</span>
+      </div>
+      <div class="ctrl-grid">
+        <button class="btn" onclick="sendCmd('M '+pwm()+' 0')">Left motor CW<small>forward</small></button>
+        <button class="btn" onclick="sendCmd('M -'+pwm()+' 0')">Left motor CCW<small>reverse</small></button>
+        <button class="btn" onclick="sendCmd('M 0 '+pwm())">Right motor CW<small>forward</small></button>
+        <button class="btn" onclick="sendCmd('M 0 -'+pwm())">Right motor CCW<small>reverse</small></button>
+        <button class="btn" onclick="sendCmd('M '+pwm()+' '+pwm())">Both forward<small>drive ahead</small></button>
+        <button class="btn" onclick="sendCmd('M -'+pwm()+' -'+pwm())">Both reverse<small>back up</small></button>
+        <button class="btn" onclick="sendCmd('M -'+pwm()+' '+pwm())">Spin left<small>rotate in place</small></button>
+        <button class="btn" onclick="sendCmd('M '+pwm()+' -'+pwm())">Spin right<small>rotate in place</small></button>
+        <button class="btn stop" onclick="sendCmd('S')">STOP</button>
+      </div>
+      <div class="ctrl-note">Wheels OFF the ground. Each click drives for up to 3s (firmware watchdog), then auto-stops. Needs <b>drive-bridge.ps1</b> running.</div>
+    </div>
 
     <div class="card col-6">
       <h2>Tilt Angle (live)</h2>
@@ -85,15 +122,54 @@
     </div>
   </div>
 
-  <div class="footer" id="footer">Read-only telemetry view - this dashboard never commands the robot.</div>
+  <div class="footer" id="footer">Telemetry view with manual troubleshoot controls. Keep the wheels OFF the ground before driving.</div>
 </div>
 
 <script>
 const MAXPTS = 60;          // ~12s of history at 5Hz
+const STALE_MS = 3000;      // telemetry older than this => bridge stale/offline
 const angHist = [], spdLHist = [], spdRHist = [], labels = [];
-let lastUpdated = null, staleSince = null;
+let lastUpdated = null;     // raw 'Updated' string from the last packet
+let lastPacketMs = null;    // Date.now() of the last *changed* packet we saw
+let lastUpdatedSeen = null; // detect when 'Updated' stops advancing (bridge dead)
+let lastLink = null;   // 'bluetooth' | 'usb' from the latest packet
 // Latch: once a wheel has actually turned this session, we know its encoder works.
 let leftEverMoved = false, rightEverMoved = false;
+
+// Parse the bridge 'Updated' local timestamp ('yyyy-MM-dd HH:mm:ss') to epoch ms.
+function parseUpdated(s){
+  if(!s || s === '(waiting for bridge)') return null;
+  const t = Date.parse(s.replace(' ', 'T'));   // local time
+  return isNaN(t) ? null : t;
+}
+// Age of the freshest telemetry we have, in ms (Infinity if none yet).
+function telemetryAgeMs(){
+  // Prefer the device timestamp; fall back to when we last saw the value change.
+  const fromStamp = parseUpdated(lastUpdated);
+  if(fromStamp != null){
+    const age = Date.now() - fromStamp;
+    // Clock skew guard: if the file stopped changing, trust our own observation.
+    if(lastPacketMs != null) return Math.max(age, Date.now() - lastPacketMs);
+    return age;
+  }
+  if(lastPacketMs != null) return Date.now() - lastPacketMs;
+  return Infinity;
+}
+
+// --- manual control -> local bridge command endpoint (drive-bridge.ps1) ------
+const CMD_URL = 'http://127.0.0.1:8787/cmd';
+function pwm(){ return parseInt(document.getElementById('pwm-slider').value, 10) || 0; }
+async function sendCmd(cmd){
+  const s = document.getElementById('cmd-status');
+  try{
+    const res = await fetch(CMD_URL, { method:'POST', body:cmd });
+    if(res.ok){ s.textContent = 'sent: ' + cmd; s.className = 'pill green'; }
+    else      { s.textContent = 'rejected: ' + cmd; s.className = 'pill red'; }
+  }catch(e){
+    s.textContent = 'bridge offline - start drive-bridge.ps1';
+    s.className = 'pill red';
+  }
+}
 
 async function loadTelemetry(){
   try{
@@ -124,8 +200,11 @@ function push(arr, v){ arr.push(v); if(arr.length > MAXPTS) arr.shift(); }
 function render(d){
   if(!d){ document.getElementById('subtitle').textContent = 'No telemetry yet. Run auto-launch.ps1 (or drive-bridge.ps1) and connect the board.'; return; }
 
+  const linkDesc = (d.Link === 'bluetooth')
+    ? `Bluetooth (${d.Port||'BLE'})`
+    : `USB ${d.Port||'?'} @ ${d.Baud||'?'} baud`;
   document.getElementById('subtitle').textContent =
-    `Port ${d.Port||'?'} @ ${d.Baud||'?'} baud - device clock ${Math.round((d.t||0)/1000)}s - updated ${d.Updated||'?'}`;
+    `${linkDesc} - device clock ${Math.round((d.t||0)/1000)}s - updated ${d.Updated||'?'}`;
 
   // Headline metrics
   document.getElementById('m-angle').innerHTML = (d.MpuOk ? (d.angle).toFixed(1) : '--') + '<small> deg</small>';
@@ -186,23 +265,54 @@ function render(d){
   angleChart.update(); speedChart.update();
 
   // Link freshness
+  if(d.Updated !== lastUpdatedSeen){ lastPacketMs = Date.now(); lastUpdatedSeen = d.Updated; }
   lastUpdated = d.Updated;
+  lastLink = d.Link || null;
 }
 
 function renderLink(){
   const li = document.getElementById('link-info');
-  const fresh = (lastUpdated && lastUpdated !== '(waiting for bridge)');
+  const age = telemetryAgeMs();
+  const hasData = (lastUpdated && lastUpdated !== '(waiting for bridge)');
+  const live = hasData && age <= STALE_MS;
+  const transport = lastLink === 'bluetooth'
+    ? '<span class="pill blue">Bluetooth</span>'
+    : (lastLink === 'usb' ? '<span class="pill blue">USB cable</span>' : '<span class="pill yellow">--</span>');
+  let bridge;
+  if(!hasData)      bridge = '<span class="pill yellow">waiting</span>';
+  else if(live)     bridge = '<span class="pill green">receiving</span>';
+  else              bridge = '<span class="pill red">stale / offline</span>';
+  const ageTxt = (age === Infinity) ? '--' : (age/1000).toFixed(1) + 's ago';
   li.innerHTML = `
-    <div class="row"><span>Bridge</span>${fresh
-      ? '<span class="pill green">receiving</span>' : '<span class="pill yellow">waiting</span>'}</div>
+    <div class="row"><span>Transport</span>${transport}</div>
+    <div class="row"><span>Bridge</span>${bridge}</div>
     <div class="row"><span>Last packet</span><b>${lastUpdated || '--'}</b></div>
-    <div class="row"><span>Mode</span><span class="pill blue">read-only</span></div>`;
+    <div class="row"><span>Data age</span><b>${ageTxt}</b></div>`;
+}
+
+// Top-of-page connection banner: makes a dead/stale dashboard obvious at a glance.
+function renderConnBanner(){
+  const b = document.getElementById('conn-banner');
+  const age = telemetryAgeMs();
+  const hasData = (lastUpdated && lastUpdated !== '(waiting for bridge)');
+  if(!hasData){
+    b.style.display = '';
+    b.className = 'banner warn';
+    b.textContent = 'Waiting for telemetry - start drive-bridge.ps1 (or auto-launch.ps1) and connect the robot.';
+  } else if(age > STALE_MS){
+    b.style.display = '';
+    b.className = 'banner stale';
+    b.textContent = 'Bridge OFFLINE - telemetry is ' + (age/1000).toFixed(0) + 's stale. The robot or drive-bridge.ps1 is not running. Data below is frozen.';
+  } else {
+    b.style.display = 'none';
+  }
 }
 
 async function tick(){
   const d = await loadTelemetry();
   render(d);
   renderLink();
+  renderConnBanner();
 }
 setInterval(tick, 250);
 tick();

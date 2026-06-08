@@ -3,10 +3,18 @@ telemetry.json
 telemetry.js
 command.txt
 
+# Auto-launch watcher runtime log (recreated each run)
+auto-launch.log
+
 # arduino-cli build output
 build/
 *.hex
 *.elf
+
+# BLE helper compiled binary (rebuild with .\ble.ps1 -Rebuild) + scratch captures
+ble-bridge.exe
+ble.*.txt
+ble-scan.*.txt
 
 # OS / editor cruft
 Thumbs.db

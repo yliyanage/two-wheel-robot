@@ -1,9 +1,13 @@
 # STRIDE Threat Model - Tumbller Robot Telemetry Project
 
-Scope: an Arduino Nano (Elegoo Tumbller self-balancing robot) connected over a
-USB-serial (CH340, COM3) link to a Windows PC. A PowerShell **bridge** reads the
-robot's telemetry and writes `telemetry.json`; a local **dashboard** (`dashboard.html`)
-displays it. The firmware currently holds the motor driver in **STANDBY (motors off)**.
+Scope: an Arduino Nano (Elegoo Tumbller self-balancing robot) connected to a
+Windows PC over **USB-serial (CH340, COM3)** or **Bluetooth Low Energy** (the
+robot's onboard `ELEGOO BT16` HM-10/CC2541 module, service `FFE0` / characteristic
+`FFE1`). A PowerShell **bridge** reads the robot's telemetry and writes
+`telemetry.json`; a local **dashboard** (`dashboard.html`) displays it and can send
+a small whitelist of drive commands. Over BLE the link is carried by a .NET helper
+(`ble-bridge.exe`). The firmware enables the motor driver only while a command is
+active, under a hard PWM cap and a 3 s auto-stop watchdog.
 
 This is a hobby/desktop system, not a production deployment. The model focuses on
 the realistic risks: **physical safety (the robot moving unexpectedly)**, data
@@ -14,15 +18,21 @@ integrity, and not bricking the board. Every mitigation has a concrete rollback.
 ## Trust boundaries
 
 ```
-[Operator] --USB--> [Arduino Nano firmware] --serial--> [drive-bridge.ps1] --file--> [telemetry.json] --> [dashboard.html]
+[Operator] --USB/BLE--> [Arduino Nano firmware] --serial/FFE1--> [drive-bridge.ps1] --file--> [telemetry.json] --> [dashboard.html]
+                                                  (BLE only: via ble-bridge.exe pipe)
 ```
 
 1. **USB / serial port** - only one process can hold COM3 at a time.
-2. **Firmware <-> PC** - plain-text serial, no auth (by design; local cable).
-3. **Bridge -> files -> dashboard** - local files, read-only consumer.
+2. **BLE link** - the module accepts one central at a time (the PC *or* the phone
+   app, not both). Plain-text GATT, **no pairing/auth** on the `FFE1` characteristic
+   (HM-10 default) - anyone in radio range could connect when the PC/phone is not.
+3. **Firmware <-> PC** - plain-text serial/GATT, no auth (by design; local/bench).
+4. **Bridge -> files -> dashboard** - local files; the dashboard also POSTs commands
+   to `http://127.0.0.1:8787/cmd` (loopback only).
 
-The dashboard is strictly **read-only**: it never writes to the serial port and
-cannot command the robot. Commanding is out of scope until motor control is added.
+The dashboard can command the robot, but only through a **whitelist** (`F [pwm]`,
+`S`, `M <l> <r>`); the firmware caps PWM and auto-stops after 3 s. Intended for
+**bench testing with the wheels off the ground**.
 
 ---
 
@@ -30,11 +40,20 @@ cannot command the robot. Commanding is out of scope until motor control is adde
 
 ### S - Spoofing
 - **Risk:** A different device enumerates as COM3 and feeds fake telemetry; or the
-  dashboard reads a stale `telemetry.json` left by an old run.
-- **Likelihood/impact:** Low / Low.
+  dashboard reads a stale `telemetry.json` left by an old run. Over **BLE**, an
+  attacker in radio range could connect to the unauthenticated `FFE1` characteristic
+  and either spoof telemetry or send drive commands while the PC/phone is
+  disconnected.
+- **Likelihood/impact:** Low / Low-Medium (BLE adds range but the robot is
+  bench-only, wheels off the ground, PWM-capped and watchdog-stopped).
 - **Mitigations:** Bridge only accepts lines starting with `TLM`; dashboard shows a
   `Last packet` timestamp and a `Bridge: receiving/waiting` pill so stale data is
-  visible. Verify the port with Device Manager (CH340 = `VID_1A86&PID_7523`).
+  visible, plus a `Transport` pill (USB/Bluetooth). Verify the port with Device
+  Manager (CH340 = `VID_1A86&PID_7523`); verify the BLE peer MAC with `.\ble.ps1
+  scan` (expected `48:87:2D:76:EC:F9`). Keep BLE connected from the PC/phone so no
+  third party can occupy the single-central slot; power the robot off when idle. For
+  a hardened setup, replace the stock module with one that enforces pairing, or use
+  USB only.
 - **Rollback:** Delete `telemetry.json`/`telemetry.js`; the dashboard falls back to
   the seed and shows "waiting".
 
