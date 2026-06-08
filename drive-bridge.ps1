@@ -162,6 +162,15 @@ try {
 Write-Host "Streaming telemetry -> $jsonOut. Queue commands by writing command.txt."
 try {
     while ($true) {
+        # --- 0a. BLE link health: if the tunnel helper exits (robot powered off
+        # or out of range) stop the whole bridge so the watcher can reconnect on
+        # the next power-on. Without this the loop would spin forever on a dead
+        # link and auto-launch would never notice the bridge was stale.
+        if ($Ble -and $bleProc -and $bleProc.HasExited) {
+            Write-Host "BLE tunnel ended (robot off / out of range). Stopping bridge so it can reconnect."
+            break
+        }
+
         # --- 0. handle a pending dashboard button command (HTTP) ---
         if ($listener) {
             if (-not $ctxTask) { $ctxTask = $listener.GetContextAsync() }
