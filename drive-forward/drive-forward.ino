@@ -12,10 +12,13 @@
  *   - PWM is capped at PWM_MAX.
  *   - A watchdog auto-stops the motors after RUN_MAX_MS unless re-commanded,
  *     so a lost serial link cannot leave the wheels spinning.
- *   - 'S' (or any unknown input) is an immediate emergency stop.
+ *   - 'S' is an explicit emergency stop. Unrecognized input is IGNORED (motor
+ *     EMI can inject noise bytes on the serial RX while driving; ignoring them
+ *     keeps a deliberate drive alive, and the watchdog still guarantees a stop).
  *
  * Serial commands (9600 baud, newline-terminated):
  *   F [pwm]   drive both wheels forward (pwm optional, default DEFAULT_PWM)
+ *   M l r     manual: signed PWM per motor (+forward / -reverse), e.g. "M 80 -80"
  *   S         stop (motors off, driver standby)
  */
 
@@ -58,9 +61,11 @@ bool mpuRead() {
   return true;
 }
 
-// FORWARD direction = both DIR pins LOW.
+// FORWARD direction = both DIR pins LOW; REVERSE = the opposite level.
 const int FWD_LEFT  = LOW;
 const int FWD_RIGHT = LOW;
+const int REV_LEFT  = HIGH;
+const int REV_RIGHT = HIGH;
 
 // ---- Safety limits -------------------------------------------------------
 const int           PWM_MAX     = 120;   // hard cap on commanded speed
@@ -72,7 +77,8 @@ volatile long encLeft  = 0;
 volatile long encRight = 0;
 bool          driving      = false;
 unsigned long driveStarted = 0;
-int           curPwm        = 0;
+int           curPwmL       = 0;   // signed: + = forward, - = reverse
+int           curPwmR       = 0;
 unsigned long lastTlm       = 0;
 long          lastEncL      = 0;
 long          lastEncR      = 0;
@@ -94,27 +100,39 @@ void allStop() {
   digitalWrite(PIN_STBY, LOW);   // driver standby = nothing can move
   digitalWrite(PIN_LED, LOW);
   driving = false;
-  curPwm  = 0;
+  curPwmL = 0;
+  curPwmR = 0;
 }
 
-void driveForward(int pwm) {
-  if (pwm < 0)       pwm = 0;
-  if (pwm > PWM_MAX) pwm = PWM_MAX;
+// Drive each motor independently. Values are signed PWM:
+//   > 0 -> that motor's FORWARD direction, < 0 -> REVERSE, 0 -> stopped.
+// Magnitudes are clamped to PWM_MAX; the watchdog still auto-stops after RUN_MAX_MS.
+void driveMotors(int left, int right) {
+  left  = constrain(left,  -PWM_MAX, PWM_MAX);
+  right = constrain(right, -PWM_MAX, PWM_MAX);
 
-  digitalWrite(PIN_DIR_LEFT,  FWD_LEFT);
-  digitalWrite(PIN_DIR_RIGHT, FWD_RIGHT);
+  digitalWrite(PIN_DIR_LEFT,  left  >= 0 ? FWD_LEFT  : REV_LEFT);
+  digitalWrite(PIN_DIR_RIGHT, right >= 0 ? FWD_RIGHT : REV_RIGHT);
   digitalWrite(PIN_STBY, HIGH);          // enable driver
-  analogWrite(PIN_PWM_LEFT,  pwm);
-  analogWrite(PIN_PWM_RIGHT, pwm);
-  digitalWrite(PIN_LED, HIGH);
+  analogWrite(PIN_PWM_LEFT,  abs(left));
+  analogWrite(PIN_PWM_RIGHT, abs(right));
 
-  driving      = true;
-  curPwm       = pwm;
+  driving      = (left != 0 || right != 0);
+  digitalWrite(PIN_LED, driving ? HIGH : LOW);
+  curPwmL      = left;
+  curPwmR      = right;
   driveStarted = millis();
+}
+
+// Both wheels forward at the same speed (kept for the simple 'F' command).
+void driveForward(int pwm) {
+  if (pwm < 0) pwm = 0;
+  driveMotors(pwm, pwm);
 }
 
 void setup() {
   Serial.begin(9600);
+  Serial.setTimeout(50);   // don't let a noisy/partial line stall the loop
   Wire.begin();
 
   pinMode(PIN_STBY,      OUTPUT);
@@ -136,7 +154,7 @@ void setup() {
 
   mpuOk = mpuBegin();
 
-  Serial.println(F("# drive-forward ready. Commands: 'F [pwm]', 'S'. Keep wheels OFF ground."));
+  Serial.println(F("# drive-forward ready. Commands: 'F [pwm]', 'M l r', 'S'. Keep wheels OFF ground."));
 }
 
 void loop() {
@@ -152,10 +170,31 @@ void loop() {
         arg.trim();
         if (arg.length() > 0) pwm = arg.toInt();
         driveForward(pwm);
-        Serial.print(F("DRIVE forward pwm=")); Serial.println(curPwm);
-      } else {
-        allStop();                        // 'S' or anything unexpected
+        Serial.print(F("DRIVE forward pwm=")); Serial.println(curPwmL);
+      } else if (c == 'M' || c == 'm') {
+        // "M <left> <right>" - signed per-motor PWM (manual troubleshoot).
+        String arg = line.substring(1);
+        arg.trim();
+        int sp = arg.indexOf(' ');
+        int l = 0, r = 0;
+        if (sp > 0) {
+          l = arg.substring(0, sp).toInt();
+          r = arg.substring(sp + 1).toInt();
+        } else {
+          l = arg.toInt();                // single value -> both motors
+          r = l;
+        }
+        driveMotors(l, r);
+        Serial.print(F("DRIVE L=")); Serial.print(curPwmL);
+        Serial.print(F(" R="));      Serial.println(curPwmR);
+      } else if (c == 'S' || c == 's') {
+        allStop();
         Serial.println(F("STOP"));
+      } else {
+        // Unrecognized input - almost always electrical noise injected on the
+        // serial RX while the motors run (TB6612 / motor EMI). Ignore it so a
+        // stray byte cannot kill a deliberate drive. Safety still holds: 'S'
+        // above is the explicit stop and the RUN_MAX_MS watchdog auto-stops.
       }
     }
   }
@@ -198,8 +237,8 @@ void loop() {
     Serial.print(F(" gy="));      Serial.print(gy);
     Serial.print(F(" gz="));      Serial.print(gz);
     Serial.print(F(" angle="));   Serial.print(angle, 2);
-    Serial.print(F(" pwmL="));    Serial.print(driving ? curPwm : 0);
-    Serial.print(F(" pwmR="));    Serial.print(driving ? curPwm : 0);
+    Serial.print(F(" pwmL="));    Serial.print(driving ? curPwmL : 0);
+    Serial.print(F(" pwmR="));    Serial.print(driving ? curPwmR : 0);
     Serial.print(F(" stby="));    Serial.print(driving ? 0 : 1);
     Serial.print(F(" mpu="));     Serial.println(mpuOk ? 1 : 0);
   }
