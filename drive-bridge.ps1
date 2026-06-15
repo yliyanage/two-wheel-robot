@@ -138,12 +138,14 @@ else {
 
 $lastWrite   = [DateTime]::MinValue
 $writeEveryMs = 200
-$numeric = 't','encL','encR','spdL','spdR','ax','ay','az','gx','gy','gz','angle','pwmL','pwmR','stby','mpu'
+$numeric = 't','encL','encR','spdL','spdR','ax','ay','az','gx','gy','gz','angle','pwmL','pwmR','stby','mpu','bal','tgt','kp','ki','kd','trim','knl','ksmc','smc','vbat'
 $lastCmd = ''
 
 # Only these command shapes are accepted from the dashboard (browser) endpoint.
 # Keeps the serial link from being fed arbitrary input by a web page.
-$cmdPattern = '^(F(\s+\d{1,3})?|S|M\s+-?\d{1,3}(\s+-?\d{1,3})?)$'
+#   F [pwm] | S | M l r | B 0|1 | C | D fwd turn | K kp kd | V kp ki | T kp kd | N kn ks l p | Z trim
+$numTok = '-?\d+(\.\d+)?'
+$cmdPattern = "^(F(\s+\d{1,3})?|S|M\s+-?\d{1,3}(\s+-?\d{1,3})?|B\s+[01]|C|D\s+$numTok\s+$numTok|K\s+$numTok\s+$numTok|V\s+$numTok\s+$numTok|T\s+$numTok\s+$numTok|N\s+$numTok(\s+$numTok){0,3}|Z\s+$numTok)$"
 
 # --- optional local command endpoint so the dashboard can drive the robot ----
 # Binds to 127.0.0.1 only (no admin URL ACL needed, not reachable off-box).
