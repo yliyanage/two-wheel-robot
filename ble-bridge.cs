@@ -16,10 +16,18 @@
 //   scan [seconds]
 //   enum <mac-hex>
 //   tunnel <mac-hex> <serviceUuid> <notifyUuid> <writeUuid>
+//   tcp <port> <mac-hex> <serviceUuid> <notifyUuid> <writeUuid>
+//       Binary-safe variant of tunnel that exposes the BLE serial link as a
+//       localhost TCP server (raw bytes, no line buffering). avrdude can then
+//       flash the board over BLE with: -P net:127.0.0.1:<port>. Experimental:
+//       BLE throughput/latency and the lack of a DTR auto-reset make this
+//       marginal; press the board's reset button when avrdude starts.
 
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using Windows.Foundation;
 using Windows.Devices.Bluetooth;
@@ -44,7 +52,7 @@ static class Program
     {
         try
         {
-            if (args.Length == 0) { Console.Error.WriteLine("usage: scan [secs] | enum <mac> | tunnel <mac> <svc> <notify> <write>"); return 2; }
+            if (args.Length == 0) { Console.Error.WriteLine("usage: scan [secs] | enum <mac> | tunnel <mac> <svc> <notify> <write> | tcp <port> <mac> <svc> <notify> <write>"); return 2; }
             switch (args[0].ToLowerInvariant())
             {
                 case "scan":   Scan(args.Length > 1 ? int.Parse(args[1]) : 12); return 0;
@@ -52,6 +60,10 @@ static class Program
                 case "tunnel":
                     if (args.Length < 5) { Console.Error.WriteLine("tunnel needs <mac> <svc> <notify> <write>"); return 2; }
                     Tunnel(ParseMac(args[1]), new Guid(args[2]), new Guid(args[3]), new Guid(args[4]));
+                    return 0;
+                case "tcp":
+                    if (args.Length < 6) { Console.Error.WriteLine("tcp needs <port> <mac> <svc> <notify> <write>"); return 2; }
+                    TcpTunnel(int.Parse(args[1]), ParseMac(args[2]), new Guid(args[3]), new Guid(args[4]), new Guid(args[5]));
                     return 0;
                 default: Console.Error.WriteLine("unknown mode: " + args[0]); return 2;
             }
@@ -205,4 +217,91 @@ static class Program
         }
         _stop.Set();
     }
+
+    // --- binary-safe TCP tunnel (for avrdude firmware upload over BLE) --------
+    // Same BLE connect/subscribe as Tunnel, but instead of stdio it relays a
+    // localhost TCP socket: socket bytes -> GATT write (raw, chunked); GATT
+    // notify -> socket (raw). No line buffering, so STK500 binary survives.
+    static NetworkStream _net;
+
+    static void TcpTunnel(int port, ulong addr, Guid svcUuid, Guid notifyUuid, Guid writeUuid)
+    {
+        var dev = Wait(BluetoothLEDevice.FromBluetoothAddressAsync(addr));
+        if (dev == null) { Console.Error.WriteLine("connect failed"); Environment.Exit(1); }
+        dev.ConnectionStatusChanged += delegate (BluetoothLEDevice d, object o)
+        {
+            Console.Error.WriteLine("link: " + d.ConnectionStatus);
+            if (d.ConnectionStatus == BluetoothConnectionStatus.Disconnected) _stop.Set();
+        };
+
+        var sr = Wait(dev.GetGattServicesAsync(BluetoothCacheMode.Uncached));
+        if (sr.Status != GattCommunicationStatus.Success) { Console.Error.WriteLine("services: " + sr.Status); Environment.Exit(1); }
+        GattDeviceService svc = null;
+        foreach (var s in sr.Services) { if (s.Uuid == svcUuid) { svc = s; break; } }
+        if (svc == null) { Console.Error.WriteLine("service not found: " + svcUuid); Environment.Exit(1); }
+
+        var cr = Wait(svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached));
+        GattCharacteristic notifyCh = null;
+        foreach (var c in cr.Characteristics)
+        {
+            if (c.Uuid == notifyUuid) notifyCh = c;
+            if (c.Uuid == writeUuid) _writeChar = c;
+        }
+        if (_writeChar == null) { Console.Error.WriteLine("write char not found: " + writeUuid); Environment.Exit(1); }
+        if (notifyCh == null) { Console.Error.WriteLine("notify char not found: " + notifyUuid); Environment.Exit(1); }
+
+        notifyCh.ValueChanged += delegate (GattCharacteristic c, GattValueChangedEventArgs e)
+        {
+            try
+            {
+                var reader = DataReader.FromBuffer(e.CharacteristicValue);
+                byte[] bytes = new byte[e.CharacteristicValue.Length];
+                reader.ReadBytes(bytes);
+                var ns = _net;
+                if (ns != null) { ns.Write(bytes, 0, bytes.Length); ns.Flush(); }
+            }
+            catch { }
+        };
+
+        var cfg = Wait(notifyCh.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify));
+        if (cfg != GattCommunicationStatus.Success) { Console.Error.WriteLine("subscribe failed: " + cfg); Environment.Exit(1); }
+
+        var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        Console.Error.WriteLine("tcp tunnel up on 127.0.0.1:" + port + " (notify->socket, socket->write raw). Waiting for avrdude...");
+
+        TcpClient client = listener.AcceptTcpClient();
+        client.NoDelay = true;
+        _net = client.GetStream();
+        Console.Error.WriteLine("avrdude connected.");
+
+        // socket -> GATT write, chunked to <=20 bytes (default ATT MTU payload).
+        var buf = new byte[4096];
+        try
+        {
+            int n;
+            while ((n = _net.Read(buf, 0, buf.Length)) > 0)
+            {
+                int off = 0;
+                while (off < n)
+                {
+                    int len = Math.Min(20, n - off);
+                    var dw = new DataWriter();
+                    var chunk = new byte[len];
+                    Array.Copy(buf, off, chunk, 0, len);
+                    dw.WriteBytes(chunk);
+                    Wait(_writeChar.WriteValueAsync(dw.DetachBuffer(), _writeOpt));
+                    off += len;
+                }
+            }
+        }
+        catch (Exception ex) { Console.Error.WriteLine("relay err: " + ex.Message); }
+
+        _stop.Set();
+        try { Wait(notifyCh.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.None)); } catch { }
+        try { listener.Stop(); } catch { }
+        dev.Dispose();
+        Console.Error.WriteLine("tcp tunnel closed");
+    }
 }
+

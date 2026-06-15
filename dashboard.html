@@ -50,11 +50,18 @@
   .slider-row input[type=range]{flex:1;accent-color:var(--blue)}
   .slider-row b{font-variant-numeric:tabular-nums;min-width:34px;text-align:right}
   .ctrl-note{color:var(--muted);font-size:12px;margin-top:10px}
+  .batt-wrap{display:flex;align-items:center;gap:14px;margin-top:6px}
+  .batt{position:relative;flex:1;height:22px;border:2px solid var(--border);border-radius:5px;background:#0d1117;overflow:hidden}
+  .batt-fill{height:100%;width:0;border-radius:2px;transition:width .4s,background .4s}
+  .batt-fill.green{background:var(--green)}
+  .batt-fill.yellow{background:var(--yellow)}
+  .batt-fill.red{background:var(--red)}
+  .batt-cap{width:4px;height:10px;background:var(--border);border-radius:0 2px 2px 0}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Tumbller Robot Dashboard</h1>
+  <h1>Two Wheel Robot Dashboard</h1>
   <div class="sub" id="subtitle">Connecting to telemetry...</div>
 
   <div class="banner stale" id="conn-banner" style="display:none"></div>
@@ -66,6 +73,17 @@
     <div class="card col-3"><h2>Left Wheel</h2><div class="metric" id="m-spdL">--</div><div class="label">encoder counts / sec</div></div>
     <div class="card col-3"><h2>Right Wheel</h2><div class="metric" id="m-spdR">--</div><div class="label" id="m-spdR-lbl">encoder counts / sec</div></div>
     <div class="card col-3"><h2>IMU (MPU6050)</h2><div class="metric" id="m-mpu">--</div><div class="label">I2C gyro / accel</div></div>
+
+    <div class="card col-12">
+      <h2>Battery <span id="batt-status" class="pill blue">--</span></h2>
+      <div class="batt-wrap">
+        <div class="metric" id="m-vbat" style="min-width:140px">--<small> V</small></div>
+        <div class="batt"><div class="batt-fill green" id="batt-fill"></div></div>
+        <div class="batt-cap"></div>
+        <b id="batt-pct" style="min-width:48px;text-align:right;font-variant-numeric:tabular-nums">--%</b>
+      </div>
+      <div class="label" id="batt-note">2S Li-ion pack (A2 sense). Charges at 8.4 V, sags under load when low.</div>
+    </div>
 
     <div class="card col-12">
       <h2>Manual control / troubleshoot</h2>
@@ -88,6 +106,45 @@
         <button class="btn stop" onclick="sendCmd('S')">STOP</button>
       </div>
       <div class="ctrl-note">Wheels OFF the ground. Each click drives for up to 3s (firmware watchdog), then auto-stops. Needs <b>drive-bridge.ps1</b> running.</div>
+    </div>
+
+    <div class="card col-12">
+      <h2>Self-balancing (ELEGOO method)</h2>
+      <div class="slider-row">
+        <button class="btn" id="bal-toggle" style="max-width:170px" onclick="toggleBalance()">Enable balancing</button>
+        <button class="btn" style="max-width:150px" onclick="sendCmd('C')">Calibrate upright</button>
+        <span id="bal-status" class="pill blue">OFF</span>
+        <span class="label" style="margin:0 0 0 auto">zero <b id="bal-tgt">0.0</b>&deg; / tilt <b id="bal-now">--</b>&deg;</span>
+      </div>
+      <div class="ctrl-grid" id="bal-move" style="opacity:.5;pointer-events:none">
+        <button class="btn" onclick="sendCmd('D 60 0')">Forward<small>drive ahead</small></button>
+        <button class="btn" onclick="sendCmd('D -60 0')">Backward<small>drive back</small></button>
+        <button class="btn" onclick="sendCmd('D 0 -50')">Spin left<small>turn in place</small></button>
+        <button class="btn" onclick="sendCmd('D 0 50')">Spin right<small>turn in place</small></button>
+        <button class="btn stop" style="background:#21262d;border-color:#30363d;color:var(--text);font-size:13px;padding:10px 8px" onclick="sendCmd('D 0 0')">Centre / hold</button>
+      </div>
+      <div class="slider-row"><span class="label" style="margin:0;min-width:96px">kp&#95;balance</span>
+        <input type="range" id="kp-slider" min="0" max="120" step="1" value="55" oninput="kpv.textContent=this.value;sendGains()">
+        <b id="kpv">55</b></div>
+      <div class="slider-row"><span class="label" style="margin:0;min-width:96px">kd&#95;balance</span>
+        <input type="range" id="kd-slider" min="0" max="3" step="0.05" value="0.75" oninput="kdv.textContent=this.value;sendGains()">
+        <b id="kdv">0.75</b></div>
+      <div class="slider-row"><span class="label" style="margin:0;min-width:96px">kp&#95;speed</span>
+        <input type="range" id="kps-slider" min="0" max="30" step="0.5" value="10" oninput="kpsv.textContent=this.value;sendSpeedGains()">
+        <b id="kpsv">10</b></div>
+      <div class="slider-row"><span class="label" style="margin:0;min-width:96px">ki&#95;speed</span>
+        <input type="range" id="kis-slider" min="0" max="1" step="0.01" value="0.26" oninput="kisv.textContent=this.value;sendSpeedGains()">
+        <b id="kisv">0.26</b></div>
+      <div class="slider-row"><span class="label" style="margin:0;min-width:96px">kp&#95;nl <small style="color:var(--muted)">(sched)</small></span>
+        <input type="range" id="knl-slider" min="0" max="6" step="0.1" value="0.8" oninput="knlv.textContent=this.value;sendNlGains()">
+        <b id="knlv">0.8</b></div>
+      <div class="slider-row"><span class="label" style="margin:0;min-width:96px">k&#95;smc <small style="color:var(--muted)">(slide)</small></span>
+        <input type="range" id="ksmc-slider" min="0" max="40" step="0.5" value="8" oninput="ksmcv.textContent=this.value;sendNlGains()">
+        <b id="ksmcv">8</b></div>
+      <div class="slider-row"><span class="label" style="margin:0;min-width:96px">Trim &deg;</span>
+        <input type="range" id="trim-slider" min="-15" max="15" step="0.2" value="0" oninput="trimv.textContent=this.value;sendTrim()">
+        <b id="trimv">0</b></div>
+      <div class="ctrl-note"><b>Wheels ON the ground.</b> 1) Hold the robot vertical and click <b>Calibrate upright</b> (sets tilt zero). 2) Click <b>Enable balancing</b> and let go. Defaults are ELEGOO's factory gains (kp&#95;balance 55, kd&#95;balance 0.75, kp&#95;speed 10, ki&#95;speed 0.26). If it drives the <i>wrong</i> way when tilted, flip <b>MOTOR_SIGN</b> in the firmware and reflash. A tilt past 22&deg; auto-stops the motors (pick-up detection).</div>
     </div>
 
     <div class="card col-6">
@@ -171,6 +228,43 @@ async function sendCmd(cmd){
   }
 }
 
+// --- self-balancing controls -------------------------------------------------
+let balOn = false;          // last known balance state (from telemetry)
+let gainsSynced = false;    // pull firmware gains into the sliders once
+function toggleBalance(){ sendCmd(balOn ? 'B 0' : 'B 1'); }
+let gainTimer = null;
+function sendGains(){   // balance (angle) ring: K kp_balance kd_balance
+  clearTimeout(gainTimer);
+  gainTimer = setTimeout(() => {
+    const kp = document.getElementById('kp-slider').value;
+    const kd = document.getElementById('kd-slider').value;
+    sendCmd(`K ${kp} ${kd}`);
+  }, 180);
+}
+let spdTimer = null;
+function sendSpeedGains(){   // speed ring: V kp_speed ki_speed
+  clearTimeout(spdTimer);
+  spdTimer = setTimeout(() => {
+    const kp = document.getElementById('kps-slider').value;
+    const ki = document.getElementById('kis-slider').value;
+    sendCmd(`V ${kp} ${ki}`);
+  }, 180);
+}
+let trimTimer = null;
+function sendTrim(){
+  clearTimeout(trimTimer);
+  trimTimer = setTimeout(() => sendCmd('Z ' + document.getElementById('trim-slider').value), 180);
+}
+let nlTimer = null;
+function sendNlGains(){   // nonlinear layer: N kp_nl k_smc (lambda/phi keep firmware defaults)
+  clearTimeout(nlTimer);
+  nlTimer = setTimeout(() => {
+    const knl  = document.getElementById('knl-slider').value;
+    const ksmc = document.getElementById('ksmc-slider').value;
+    sendCmd(`N ${knl} ${ksmc}`);
+  }, 180);
+}
+
 async function loadTelemetry(){
   try{
     const res = await fetch('telemetry.json?_=' + Date.now());
@@ -212,6 +306,33 @@ function render(d){
   document.getElementById('m-spdR').innerHTML  = Math.round(d.spdR) + '<small> c/s</small>';
   document.getElementById('m-mpu').innerHTML   = d.MpuOk
     ? '<span class="pill green">online</span>' : '<span class="pill red">no I2C</span>';
+
+  // Battery: map measured pack voltage to a 0-100% bar. 2S Li-ion is ~8.4 V
+  // full, ~6.6 V empty/cutoff. The stock firmware flags <6.7 V as low and
+  // >7.8 V as healthy, so we colour-code green/yellow/red against those.
+  // Coerce to a number: depending on the bridge build, vbat can arrive as a
+  // JSON number or a quoted string - Number() handles both (and toFixed needs it).
+  const vbat = Number(d.vbat);
+  if(Number.isFinite(vbat) && vbat > 0.5){
+    const VFULL = 8.4, VEMPTY = 6.6;
+    const pct = Math.max(0, Math.min(100, Math.round((vbat - VEMPTY) / (VFULL - VEMPTY) * 100)));
+    const fill = document.getElementById('batt-fill');
+    const bs = document.getElementById('batt-status');
+    let cls, txt;
+    if(vbat >= 7.8){ cls='green';  txt='good'; }
+    else if(vbat >= 6.7){ cls='yellow'; txt='low - charge soon'; }
+    else { cls='red'; txt='CRITICAL - will brown out'; }
+    fill.style.width = pct + '%';
+    fill.className = 'batt-fill ' + cls;
+    bs.className = 'pill ' + cls;
+    bs.textContent = txt;
+    document.getElementById('m-vbat').innerHTML = vbat.toFixed(2) + '<small> V</small>';
+    document.getElementById('batt-pct').textContent = pct + '%';
+  } else {
+    document.getElementById('batt-status').textContent = 'no reading';
+    document.getElementById('m-vbat').innerHTML = '--<small> V</small>';
+    document.getElementById('batt-pct').textContent = '--%';
+  }
 
   // Track whether each wheel has ever produced encoder motion this session.
   if(d.encR > 0 || Math.abs(d.spdR) > 0) rightEverMoved = true;
@@ -258,6 +379,25 @@ function render(d){
   const mb = document.getElementById('motor-banner');
   if(d.Standby){ mb.className='banner ok'; mb.textContent='Motors: STANDBY (driver disabled) - the robot cannot drive.'; }
   else { mb.className='banner warn'; mb.textContent='Motors: ENABLED - the robot can move. Keep wheels clear.'; }
+
+  // Self-balancing state
+  balOn = (d.bal === 1);
+  const bs = document.getElementById('bal-status');
+  const bt = document.getElementById('bal-toggle');
+  const bm = document.getElementById('bal-move');
+  if(balOn){ bs.textContent='BALANCING'; bs.className='pill green'; bt.textContent='Disable balancing'; bm.style.opacity='1'; bm.style.pointerEvents='auto'; }
+  else     { bs.textContent='OFF';        bs.className='pill blue';  bt.textContent='Enable balancing';  bm.style.opacity='.5'; bm.style.pointerEvents='none'; }
+  if(d.tgt !== undefined) document.getElementById('bal-tgt').textContent = (+d.tgt).toFixed(1);
+  document.getElementById('bal-now').textContent = d.MpuOk ? (+d.angle).toFixed(1) : '--';
+  // One-time: adopt the firmware's live gains so the sliders match reality.
+  // Telemetry exposes kp=kp_balance, kd=kd_balance, ki=ki_speed.
+  if(!gainsSynced && d.kp !== undefined){
+    gainsSynced = true;
+    const set = (id,v,lbl)=>{ if(v===undefined) return; const el=document.getElementById(id); if(!el) return; el.value=v; const l=document.getElementById(lbl); if(l) l.textContent=v; };
+    set('kp-slider', d.kp, 'kpv'); set('kd-slider', d.kd, 'kdv');
+    set('kis-slider', d.ki, 'kisv'); set('trim-slider', d.trim, 'trimv');
+    set('knl-slider', d.knl, 'knlv'); set('ksmc-slider', d.ksmc, 'ksmcv');
+  }
 
   // Charts
   push(labels, ''); push(angHist, d.MpuOk ? d.angle : null);

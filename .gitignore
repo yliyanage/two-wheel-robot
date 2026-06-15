@@ -19,3 +19,18 @@ ble-scan.*.txt
 # OS / editor cruft
 Thumbs.db
 .DS_Store
+
+# Dev/bench helper scripts + their generated logs (throwaway, not part of the
+# shipped project). Kept locally for tuning/diagnostics but not committed.
+build.ps1
+flash.ps1
+chk.ps1
+diag.ps1
+test-balance.ps1
+send-cmds.ps1
+bal-trace.ps1
+battery-test.ps1
+bal-trace.log
+battery-test.log
+build-out.txt
+flash-out.txt
